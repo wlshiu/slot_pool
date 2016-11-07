@@ -26,6 +26,8 @@ extern "C" {
 //=============================================================================
 //                  Constant Definition
 //=============================================================================
+#define MAX_SLOT_NUM            64
+
 typedef enum slot_pool_err
 {
     SLOT_POOL_ERR_OK        = 0,
@@ -41,18 +43,20 @@ typedef enum slot_pool_err
 #else
     #define sp_dbg(str, args...)
 #endif
+
 //=============================================================================
 //                  Structure Definition
 //=============================================================================
 typedef struct slot_pool
 {
-    void        *pPool_addr;
-    int         one_slot_length;
-    int         max_slot_num;
+    unsigned char   *pPool_addr_start;
+    unsigned char   *pPool_addr_end;
+    int             one_slot_length;
+    int             max_slot_num;
 
-    int         is_used; // TODO: use flag to mark
+    unsigned int    flags[((MAX_SLOT_NUM)+0x1F)>>5];
 
-    int         sequence_num;
+    int             sequence_num;
 } slot_pool_t;
 //=============================================================================
 //                  Global Data Definition
@@ -84,12 +88,19 @@ slot_pool_init(
             break;
         }
 
-        memset(pHSlot_pool, 0x0, sizeof(slot_pool_t));
-        pHSlot_pool->pPool_addr      = pPool_addr;
-        pHSlot_pool->one_slot_length = one_slot_length;
-        pHSlot_pool->max_slot_num    = max_slot_num;
+        if( max_slot_num > MAX_SLOT_NUM )
+        {
+            rval = SLOT_POOL_ERR_INVALID_PARAM;
+            sp_dbg("out support range %d/%d\n", max_slot_num, MAX_SLOT_NUM);
+            break;
+        }
 
-        // TODO: handle flag
+        memset(pHSlot_pool, 0x0, sizeof(slot_pool_t));
+        pHSlot_pool->pPool_addr_start = (unsigned char*)pPool_addr;
+        pHSlot_pool->one_slot_length  = one_slot_length;
+        pHSlot_pool->max_slot_num     = max_slot_num;
+        pHSlot_pool->pPool_addr_end   = pHSlot_pool->pPool_addr_start
+                                        + (pHSlot_pool->one_slot_length * pHSlot_pool->max_slot_num);
 
     } while(0);
 
@@ -103,6 +114,53 @@ slot_pool_get_slot(
 {
     slot_pool_err_t     rval = 0;
 
+    do {
+        int             i = -1, counter = 0;
+        int             max_slot_num = 0, sequence_num = 0;
+        unsigned int    *pFlags = 0, cacsh_flags = 0;
+
+        if( !pHSlot_pool || !ppSlot_addr )
+        {
+            rval = SLOT_POOL_ERR_INVALID_PARAM;
+            sp_dbg("null point: x%p, x%p\n", pHSlot_pool, ppSlot_addr);
+            break;
+        }
+
+        max_slot_num = pHSlot_pool->max_slot_num;
+        sequence_num = pHSlot_pool->sequence_num;
+        pFlags       = pHSlot_pool->flags;
+
+        while( counter++ < max_slot_num )
+        {
+            if( i != (sequence_num >> 5) )
+            {
+                i = (sequence_num >> 5);
+
+                cacsh_flags = *(pFlags + i);
+            }
+
+            if( !(cacsh_flags & (0x1u << (sequence_num & 0x1F))) )
+            {
+                *(pFlags + i) |= (0x1u << (sequence_num & 0x1F));
+                break;
+            }
+
+            sequence_num++;
+            sequence_num = (sequence_num == max_slot_num) ? 0 : sequence_num;
+        }
+
+        if( counter < max_slot_num )
+        {
+            *ppSlot_addr = pHSlot_pool->pPool_addr_start + (sequence_num * pHSlot_pool->one_slot_length);
+            pHSlot_pool->sequence_num = sequence_num + 1;
+            if( pHSlot_pool->sequence_num == max_slot_num )
+                pHSlot_pool->sequence_num = 0;
+        }
+        else
+            rval = SLOT_POOL_ERR_NO_EMPTY;
+
+    } while(0);
+
     return rval;
 }
 
@@ -112,6 +170,30 @@ slot_pool_recover_slot(
     void            *pSlot_addr)
 {
     slot_pool_err_t     rval = 0;
+
+    do {
+        int             i = 0;
+
+        if( !pHSlot_pool || !pSlot_addr )
+        {
+            rval = SLOT_POOL_ERR_INVALID_PARAM;
+            sp_dbg("null point: x%p, x%p\n", pHSlot_pool, pSlot_addr);
+            break;
+        }
+
+        if( (unsigned char*)pSlot_addr < pHSlot_pool->pPool_addr_start ||
+            (unsigned char*)pSlot_addr >= pHSlot_pool->pPool_addr_end )
+        {
+            rval = SLOT_POOL_ERR_INVALID_PARAM;
+            sp_dbg("slot addr (x%p) is not in the range !\n", pSlot_addr);
+            break;
+        }
+
+        i = ((unsigned char*)pSlot_addr - pHSlot_pool->pPool_addr_start) / pHSlot_pool->one_slot_length;
+
+        pHSlot_pool->flags[i >> 5] &= ~(0x1u << (i & 0x1F));
+
+    } while(0);
 
     return rval;
 }
